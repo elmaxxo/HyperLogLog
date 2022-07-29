@@ -113,7 +113,7 @@ measure_dense_hll_estimation_error(
 {
 	double max_err_sum = 0;
 	double std_err_sum = 0;
-	const size_t card_step = max_card / n_points;
+	const double card_step = 1.f * max_card / n_points;
 	for (size_t n = 0; n < n_points; ++n) {
 
 		size_t card = card_step * n;
@@ -164,19 +164,19 @@ measure_dense_hll_estimation_error(
  * [0, max_card] by this number of points.
  * Increasing this value can critically increase the execution time.
  */
-const size_t N_POINTS = 30;
+const size_t N_POINTS = 1000;
 
 /*
  * Number of randomly generated sets for every cardinality
  * in measure_dense_hll_estimation_error.
  * Increasing this value can critically increase the execution time.
  */
-const size_t SETS_PER_POINT = 20;
+const size_t SETS_PER_POINT = 30;
 
 /*
  * File to dump the data that is used to measure the error.
  */
-char *OUTPUT_FILE_NAME = NULL;
+char *OUTPUT_FILE_NAME = "linear_counting.data";
 
 /*
  * This test can dump the data that is used to measure
@@ -189,7 +189,7 @@ void test_dense_hyperloglog_error()
 
 	FILE *output = NULL;
 	if (OUTPUT_FILE_NAME != NULL) {
-		output = fopen(OUTPUT_FILE_NAME, "w+");
+		output = fopen(OUTPUT_FILE_NAME, "w");
 		assert(output && "Can't open the output file.");
 	}
 
@@ -199,10 +199,13 @@ void test_dense_hyperloglog_error()
 	for (int prec = HLL_MIN_PRECISION;
 	     prec <= HLL_MAX_PRECISION; ++prec) {
 		size_t n_regs = 1u << prec;
-		size_t max_card = 10 * n_regs;
+		size_t max_card = 3 * n_regs;
 		measure_dense_hll_estimation_error(prec, max_card,
 			N_POINTS, SETS_PER_POINT, errors + prec, output);
 	}
+
+	if (output)
+		fflush(output);
 
 	for (int prec = HLL_MIN_PRECISION;
 	     prec <= HLL_MAX_PRECISION; ++prec) {
@@ -234,7 +237,7 @@ void test_sparse_hll_error()
 	     prec <= HLL_MAX_PRECISION; ++prec) {
 		struct hll *hll = hll_create(prec, HLL_SPARSE);
 
-		size_t card_step = (1 << prec) / 64;
+		double card_step = (1 << prec) / 64;
 		size_t card = 0;
 		while (1) {
 			if (hll->representation != HLL_SPARSE)
@@ -284,6 +287,7 @@ void test_sparse_to_dense_convertion()
 int
 main(int argc, char *argv[])
 {
+	srand(3141592);
 	test_dense_hyperloglog_error();
 	test_sparse_hll_error();
 	test_sparse_to_dense_convertion();
