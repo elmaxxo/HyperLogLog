@@ -7,6 +7,26 @@
 #include "hll.h"
 #include "hll_empirical.h"
 
+/*
+ * measure_dense_hll_estimation_error linearly divides the range
+ * [0, max_card] by this number of points.
+ * Increasing this value can critically increase the execution time.
+ */
+const size_t N_POINTS = 20;
+
+/*
+ * Number of randomly generated sets for every cardinality
+ * in measure_dense_hll_estimation_error.
+ * Increasing this value can critically increase the execution time.
+ */
+const size_t SETS_PER_POINT = 20;
+
+/*
+ * File to dump the data that is used to measure the errors.
+ */
+char *OUTPUT_FILE_NAME = NULL;
+
+
 double
 average_sum_of(double *arr, size_t n)
 {
@@ -160,25 +180,6 @@ measure_dense_hll_estimation_error(
 #define MAX(l, r)  ((l) < (r) ? (r) : (l))
 
 /*
- * measure_dense_hll_estimation_error linearly divides the range
- * [0, max_card] by this number of points.
- * Increasing this value can critically increase the execution time.
- */
-const size_t N_POINTS = 1000;
-
-/*
- * Number of randomly generated sets for every cardinality
- * in measure_dense_hll_estimation_error.
- * Increasing this value can critically increase the execution time.
- */
-const size_t SETS_PER_POINT = 30;
-
-/*
- * File to dump the data that is used to measure the error.
- */
-char *OUTPUT_FILE_NAME = "linear_counting.data";
-
-/*
  * This test can dump the data that is used to measure
  * the estimation error. These data can be used for further
  * analysis and empirical based impovements of the algorithm.
@@ -199,7 +200,7 @@ void test_dense_hyperloglog_error()
 	for (int prec = HLL_MIN_PRECISION;
 	     prec <= HLL_MAX_PRECISION; ++prec) {
 		size_t n_regs = 1u << prec;
-		size_t max_card = 3 * n_regs;
+		size_t max_card = 10 * n_regs;
 		measure_dense_hll_estimation_error(prec, max_card,
 			N_POINTS, SETS_PER_POINT, errors + prec, output);
 	}
@@ -287,7 +288,6 @@ void test_sparse_to_dense_convertion()
 int
 main(int argc, char *argv[])
 {
-	srand(3141592);
 	test_dense_hyperloglog_error();
 	test_sparse_hll_error();
 	test_sparse_to_dense_convertion();

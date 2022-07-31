@@ -13,13 +13,13 @@
  * The algorithm allows to estimate cardinalities of multisets using almost no
  * memory overhead compared to other cardinality estimation algorithms.
  * This achieved by storing only the array 2^precision registers.
- * Each register stores properies of the added alements hashes.
+ * Each register stores some properies of the added alements hashes.
  * The register index is the last precision bits of the element hash.
- * The register value is the number of leading zeros in the hash of the element
- * plus one. The hash function for the algorithm must equally likely to give
- * values from 0 to 2^64. The idea is that big number of leading zeros are
- * achieved by large sets. The cardinality can be estimated by using registers
- * values.
+ * The register value is the highest number of leading zeros in the hashes with
+ * register index plus one. The hash function for the algorithm must equally
+ * likely to give values from 0 to 2^64. The idea is that big number of leading
+ * zeros are achieved by large sets. The cardinality can be estimated by using
+ * register values.
  * The estimation formula:
  * ESTIMATION := N_REGISTERS^2 * ALPHA / HARMONIC_SUM,
  * where N_REGISTERS is the number of registers and it equal to 2^precision,
@@ -52,7 +52,7 @@ enum HLL_CONSTANTS {
 	HLL_SPARSE_GROW_COEF = 2,
 
 	/*
-	 * The smallest precision of HyperLogLog that starts with the sparse
+	 * The smallest precision of HyperLogLog that can start with the sparse
 	 * representation. Sparse representation for smaller precision can't
 	 * store more than 100 pairs so there is no need in this representation.
 	 */
@@ -78,7 +78,7 @@ hll_is_valid_precision(uint8_t prec)
 static uint64_t
 hll_ones(uint8_t n)
 {
-	assert(n < 64);
+	assert(n <= 64);
 	return ((UINT64_C(1) << n) - 1);
 }
 
@@ -130,7 +130,7 @@ hll_hash_rank(uint64_t hash, uint8_t precision)
 static uint64_t
 hll_n_registers(uint8_t precision)
 {
-	assert(precision < 64);
+	assert(hll_is_valid_precision(precision));
 	return UINT64_C(1) << precision;
 }
 
@@ -160,7 +160,7 @@ linear_counting(size_t counters, size_t empty_counters)
 
 /*
  * Calculate the amount of memory reqired to store
- * the registers for dense representation.
+ * the registers for the dense representation.
  */
 static size_t
 hll_dense_reqired_memory(uint8_t precision)
@@ -170,7 +170,7 @@ hll_dense_reqired_memory(uint8_t precision)
 }
 
 /* Init a densely represented HyperLogLog estimator. */
-struct hll *
+void
 hll_dense_init(struct hll *hll, uint8_t precision)
 {
 	hll->representation = HLL_DENSE;
@@ -179,17 +179,16 @@ hll_dense_init(struct hll *hll, uint8_t precision)
 	/* For the dense representation data interpreted as registers. */
 	const size_t registers_size = hll_dense_reqired_memory(precision);
 	hll->data = calloc(registers_size, 1);
-	return hll;
 }
 
 /*
  * Dense register is represented by 6 bits so it can go out the range of one
- * byte but 4 registers occupy exactly 3 bytes so I called it a bucket.
+ * byte but 4 registers occupy exactly a 3-byte bucket.
  * The registers array can always be separated to such buckets because its size
  * in bits is devided by 24 if precision more than 2
  * (2^2 * 6 bits = 24 bits, other sizes differ by power of 2 times).
  *
- * ASCII-visualization of a bucket:
+ * The bucket structure:
  * +----------+----------+----------+----------+
  * |0 regsiter|1 register|2 register|3 register|
  * +----------+----------+----------+----------+
@@ -210,7 +209,7 @@ static void
 reg_bucket_init(struct reg_bucket *bucket, uint8_t *regs, size_t reg_idx)
 {
 	/*
-	 * ASCII-visualization of the logic of the function:
+	 * Visualization of the logic of the function:
 	 *
 	 * regs		  1 byte	 2 byte	       3 byte	      4 byte
 	 * |		  |		 |	       |	      |
@@ -223,11 +222,13 @@ reg_bucket_init(struct reg_bucket *bucket, uint8_t *regs, size_t reg_idx)
 	 * For instance, the 5th register is stored in (5*6 / 24 = 1) the first
 	 * bucket and its offset is equal to 5*6 % 24 = 6.
 	 */
-	size_t bucket_size = HLL_BUCKET_BITS / CHAR_BIT;
 	size_t bucket_idx = reg_idx * HLL_RANK_BITS / HLL_BUCKET_BITS;
-	bucket->addr = (uint8_t *)(regs + bucket_idx * bucket_size);
-	bucket->offset = reg_idx * HLL_RANK_BITS % HLL_BUCKET_BITS;
-	assert(bucket->offset <= HLL_BUCKET_BITS - HLL_RANK_BITS);
+	size_t offset = reg_idx * HLL_RANK_BITS % HLL_BUCKET_BITS;
+	assert(offset <= HLL_BUCKET_BITS - HLL_RANK_BITS);
+
+	size_t bucket_size = HLL_BUCKET_BITS / CHAR_BIT;
+	bucket->addr = regs + bucket_idx * bucket_size;
+	bucket->offset = offset;
 }
 
 /* Get an integer value of 3 bytes stored in the bucket. */
@@ -240,7 +241,7 @@ reg_bucket_value(const struct reg_bucket *bucket)
 
 /*
  * Get a mask that clears the register stored in the bucket and
- * saves the other boundary registers in the bucket.
+ * saves the other registers in the bucket.
  */
 static uint32_t
 reg_bucket_boundary_mask(const struct reg_bucket *bucket)
@@ -263,15 +264,41 @@ reg_bucket_boundary_mask(const struct reg_bucket *bucket)
 	return boundary_mask;
 }
 
+/* Get the value of the register stored in the bucket. */
+static uint8_t
+reg_bucket_register_value(const struct reg_bucket *bucket)
+{
+	uint32_t reg_mask = hll_ones(HLL_RANK_BITS);
+	uint32_t bucket_value = reg_bucket_value(bucket);
+	uint8_t register_value = (bucket_value >> bucket->offset) & reg_mask;
+	return register_value;
+}
+
+/* Set a new value of the register stored in the bucket. */
+static void
+reg_bucket_set_register_value(struct reg_bucket *bucket, uint8_t value)
+{
+	uint32_t boundary_mask = reg_bucket_boundary_mask(bucket);
+	uint32_t bucket_value = reg_bucket_value(bucket);
+	union {
+		uint32_t value;
+		uint8_t bytes[3];
+	} modified_bucket;
+	modified_bucket.value = (value << bucket->offset) |
+			   	(bucket_value & boundary_mask);
+
+	bucket->addr[0] = modified_bucket.bytes[0];
+	bucket->addr[1] = modified_bucket.bytes[1];
+	bucket->addr[2] = modified_bucket.bytes[2];
+}
+
 /* Get the value of the register with the idx index. */
 static uint8_t
 hll_dense_register_rank(const struct hll *hll, size_t idx)
 {
 	struct reg_bucket bucket;
 	reg_bucket_init(&bucket, hll->data, idx);
-	uint32_t reg_mask = hll_ones(HLL_RANK_BITS);
-	uint32_t bucket_value = reg_bucket_value(&bucket);
-	uint8_t rank = (bucket_value >> bucket.offset) & reg_mask;
+	uint8_t rank = reg_bucket_register_value(&bucket);
 	assert(rank <= HLL_RANK_MAX);
 	return rank;
 }
@@ -282,18 +309,8 @@ hll_dense_set_register_rank(struct hll *hll, size_t idx, uint8_t rank)
 {
 	struct reg_bucket bucket;
 	reg_bucket_init(&bucket, hll->data, idx);
-	uint32_t boundary_mask = reg_bucket_boundary_mask(&bucket);
-	uint32_t bucket_value = reg_bucket_value(&bucket);
-	union {
-		uint32_t value;
-		uint8_t bytes[3];
-	} new_bucket;
-	new_bucket.value = (rank << bucket.offset) |
-			   (bucket_value & boundary_mask);
-
-	bucket.addr[0] = new_bucket.bytes[0];
-	bucket.addr[1] = new_bucket.bytes[1];
-	bucket.addr[2] = new_bucket.bytes[2];
+	assert(rank <= HLL_RANK_MAX);
+	reg_bucket_set_register_value(&bucket, rank);
 }
 
 /* Add hash to the densely represented HyperLogLog estimator. */
@@ -313,7 +330,7 @@ hll_dense_add(struct hll *hll, uint64_t hash)
 
 /*
  * Estimate the cardinality of the densely represented HyperLogLog using the
- * estimation formula. Raw estimation can have larger relative error
+ * estimation formula. Raw estimation can have a large relative error
  * for small cardinalities.
  */
 static double
@@ -354,7 +371,7 @@ hll_dense_estimate(struct hll *hll)
 	double raw_estimation = hll_dense_raw_estimate(hll);
 
 	double hll_estimation = raw_estimation;
-	if (raw_estimation < 4.f * n_registers) {
+	if (raw_estimation < 5.f * n_registers) {
 		hll_estimation -=
 			hll_empirical_bias_correction(prec, raw_estimation);
 	}
@@ -386,12 +403,11 @@ hll_dense_estimate(struct hll *hll)
  * Instead of registers the sparse representation stores pairs of
  * register index and its the highest rank.
  * The pairs for the sparse representation have the following structure:
- * +----------+--------------------------------+
- * |   rank   |		   index	       |
- * +----------+--------------------------------+
- * |<-6 bits->|<-----------26 bits------------>|
+ * +--------------------------------+----------+
+ * |		   index	    |   rank   |
+ * +--------------------------------+----------+
+ * |<-----------26 bits------------>|<-6 bits->|
  */
-
 typedef uint32_t pair_t;
 
 /* Make a pair with specified index and rank. */
@@ -415,6 +431,7 @@ hll_sparse_pair_rank(pair_t pair)
 	return pair & hll_ones(HLL_RANK_BITS);
 }
 
+/* Get the index that would be if the dense representation was used. */
 static uint32_t
 hll_sparse_pair_dense_idx(pair_t pair, uint8_t precision)
 {
@@ -430,6 +447,7 @@ hll_sparse_pair_dense_idx(pair_t pair, uint8_t precision)
 	return idx >> (HLL_SPARSE_PRECISION - precision);
 }
 
+/* Get the rank that would be if the dense representation was used. */
 static uint8_t
 hll_sparse_pair_dense_rank(pair_t pair)
 {
@@ -460,7 +478,7 @@ struct hll_sparse_header {
 	 * Amount of memory that is used to store the HyperLogLog
 	 * (incluning the header).
 	 */
-	uint32_t size;
+	uint32_t bsize;
 	/*
 	 * Precision declared when creating HyperLogLog.
 	 * The precision is used for switching to the dense representation.
@@ -468,28 +486,26 @@ struct hll_sparse_header {
 	uint32_t dense_precision;
 };
 
-/* Get the header of sparsely represented HyperLogLog. */
+/* Get the header of a sparsely represented HyperLogLog. */
 static struct hll_sparse_header *
 hll_sparse_header(const uint8_t *sparse_hll)
 {
 	return (struct hll_sparse_header *)sparse_hll;
 }
 
-/*
- * Get the size of sparsely represented HyperLogLog.
- */
+/* Get the total size of a sparsely represented HyperLogLog. */
 static uint32_t
-hll_sparse_size(const uint8_t *sparse_hll)
+hll_sparse_bsize(const uint8_t *sparse_hll)
 {
 	struct hll_sparse_header *header = hll_sparse_header(sparse_hll);
-	return header->size;
+	return header->bsize;
 }
 
-/* Get the maximum number of the HyeprLogLog pairs. */
+/* Get the maximum number of the HyeprLogLog pairs for the current size. */
 static uint32_t
 hll_sparse_pairs_max_count(const uint8_t *sparse_hll)
 {
-	uint32_t hll_size = hll_sparse_size(sparse_hll);
+	uint32_t hll_size = hll_sparse_bsize(sparse_hll);
 	uint32_t header_size = sizeof(struct hll_sparse_header);
 	uint32_t pairs_size = hll_size - header_size;
 	uint32_t max_count = pairs_size / sizeof(pair_t);
@@ -529,7 +545,7 @@ hll_sparse_init(struct hll *hll, uint8_t precision)
 	/* For the sparse representation data interpreted as a list of pairs. */
 	hll->data = calloc(HLL_SPARSE_INITIAL_SIZE, 1);
 	struct hll_sparse_header *header = hll_sparse_header(hll->data);
-	header->size = HLL_SPARSE_INITIAL_SIZE;
+	header->bsize = HLL_SPARSE_INITIAL_SIZE;
 	header->pairs_count = 0;
 	header->dense_precision = precision;
 }
@@ -559,7 +575,7 @@ static int
 hll_sparse_can_grow(const uint8_t *sparse_hll)
 {
 	uint32_t precision = hll_sprase_dense_precision(sparse_hll);
-	uint32_t current_size = hll_sparse_size(sparse_hll);
+	uint32_t current_size = hll_sparse_bsize(sparse_hll);
 	uint32_t new_size = HLL_SPARSE_GROW_COEF * current_size;
 	uint32_t max_size = hll_sparse_max_size(precision);
 	return new_size <= max_size;
@@ -570,33 +586,30 @@ static void
 hll_sparse_grow(uint8_t **sparse_hll_addr)
 {
 	uint8_t *sparse_hll = *sparse_hll_addr;
-	uint32_t size = hll_sparse_size(sparse_hll);
-	sparse_hll = realloc(sparse_hll, HLL_SPARSE_GROW_COEF * size);
+	uint32_t bsize = hll_sparse_bsize(sparse_hll);
+	sparse_hll = realloc(sparse_hll, HLL_SPARSE_GROW_COEF * bsize);
 	struct hll_sparse_header *header = hll_sparse_header(sparse_hll);
-	header->size *= HLL_SPARSE_GROW_COEF;
+	header->bsize *= HLL_SPARSE_GROW_COEF;
 	*sparse_hll_addr = sparse_hll;
 }
 
-/*
- * Find the index of pair that stores a register index idx.
- * If there is no such pair return a number of pairs.
- */
-static uint32_t
-hll_sparse_find_idx(const uint8_t *sparse_hll, uint32_t idx)
+/* Find the pair with index idx. If there is no such pair return a NULL. */
+static pair_t *
+hll_sparse_find_pair(const uint8_t *sparse_hll, uint32_t idx)
 {
 	uint32_t count = hll_sparse_pairs_count(sparse_hll);
 	pair_t *pairs = hll_sparse_pairs(sparse_hll);
 	for (uint32_t i = 0; i < count; ++i) {
 		if (hll_sparse_pair_idx(pairs[i]) == idx) {
-			return i;
+			return pairs + i;
 		}
 	}
-	return count;
+	return NULL;
 }
 
 /* Insert a new pair at the end of the HyperLogLog list. */
 static void
-hll_sparse_insert(uint8_t *sparse_hll, pair_t pair)
+hll_sparse_push_back(uint8_t *sparse_hll, pair_t pair)
 {
 	struct hll_sparse_header *header = hll_sparse_header(sparse_hll);
 	pair_t *pairs = hll_sparse_pairs(sparse_hll);
@@ -640,13 +653,12 @@ hll_sparse_add(struct hll *hll, uint64_t hash)
 {
 	uint32_t idx = hll_hash_register_idx(hash, HLL_SPARSE_PRECISION);
 	uint32_t rank = hll_hash_rank(hash, HLL_SPARSE_PRECISION);
+	pair_t new_pair = hll_sparse_new_pair(idx, rank);
 
-	pair_t *pairs = hll_sparse_pairs(hll->data);
-	uint32_t count = hll_sparse_pairs_count(hll->data);
-	uint32_t pair_idx = hll_sparse_find_idx(hll->data, idx);
-	if (pair_idx != count) {
-		if (hll_sparse_pair_rank(pairs[pair_idx]) < rank) {
-			pairs[pair_idx] = hll_sparse_new_pair(idx, rank);
+	pair_t *pair = hll_sparse_find_pair(hll->data, idx);
+	if (pair != NULL) {
+		if (hll_sparse_pair_rank(*pair) < rank) {
+			*pair = new_pair;
 			return;
 		}
 	}
@@ -661,8 +673,7 @@ hll_sparse_add(struct hll *hll, uint64_t hash)
 		}
 	}
 
-	pair_t new_pair = hll_sparse_new_pair(idx, rank);
-	hll_sparse_insert(hll->data, new_pair);
+	hll_sparse_push_back(hll->data, new_pair);
 }
 
 /* Estimate the cardinality of the sparsely represented HyperLogLog. */
@@ -676,6 +687,21 @@ hll_sparse_estimate(const uint8_t *hll_sparse)
 	size_t n_counters = hll_n_registers(HLL_SPARSE_PRECISION);
 	size_t n_pairs = hll_sparse_pairs_count(hll_sparse);
 	return linear_counting(n_counters, n_counters - n_pairs);
+}
+
+struct hll *
+hll_create(uint8_t precision, enum HLL_REPRESENTATION representation)
+{
+	assert(precision >= HLL_MIN_PRECISION);
+	assert(precision <= HLL_MAX_PRECISION);
+	struct hll *hll = calloc(1, sizeof(*hll));
+	if (representation == HLL_SPARSE &&
+	    precision >= HLL_SPARSE_MIN_PRECISION) {
+		hll_sparse_init(hll, precision);
+	} else {
+		hll_dense_init(hll, precision);
+	}
+	return hll;
 }
 
 void
@@ -712,19 +738,4 @@ hll_destroy(struct hll *hll)
 {
 	free(hll->data);
 	free(hll);
-}
-
-struct hll *
-hll_create(uint8_t precision, enum HLL_REPRESENTATION representation)
-{
-	assert(precision >= HLL_MIN_PRECISION);
-	assert(precision <= HLL_MAX_PRECISION);
-	struct hll *hll = calloc(1, sizeof(*hll));
-	if (representation == HLL_SPARSE &&
-	    precision >= HLL_SPARSE_MIN_PRECISION) {
-		hll_sparse_init(hll, precision);
-	} else {
-		hll_dense_init(hll, precision);
-	}
-	return hll;
 }

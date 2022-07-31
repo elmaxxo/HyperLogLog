@@ -1,10 +1,12 @@
 #include "hll_empirical.h"
 
+#include <assert.h>
+
 /*
- * Array of coefficients of bias correction curves that is used to avid bias
- * of the raw estimation of the HyperLogLog algorithm.
+ * Array of coefficients of bias correction curves that is used to avoid the
+ * bias of the raw estimation of the HyperLogLog algorithm.
  * The bias correction is necessary only for small cardinalities,
- * in practice the thresold is from 2.5m to 5m. (m is the number of counters)
+ * In practice the thresold is from 2.5m to 5m. (m is the number of counters)
  */
 static const double bias_correction_curves[][6] = {
 /* precision 6 */
@@ -138,6 +140,8 @@ _Static_assert(lengthof(bias_correction_curves) == AVAILABLE_PRECSISIONS,
 double
 hll_empirical_bias_correction(uint8_t precision, double raw_estimation)
 {
+	assert(precision >= HLL_MIN_PRECISION);
+	assert(precision <= HLL_MAX_PRECISION);
 	double x1 = raw_estimation;
 	double x2 = x1 * raw_estimation;
 	double x3 = x2 * raw_estimation;
